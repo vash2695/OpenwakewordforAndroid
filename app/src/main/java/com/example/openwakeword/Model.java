@@ -22,6 +22,8 @@ import ai.onnxruntime.OrtSession;
 
 class ONNXModelRunner implements AutoCloseable {
 
+    private static final String TAG = "ONNXModelRunner";
+
     private static final int BATCH_SIZE = 1; // Replace with your batch size
 
     private final AssetManager assetManager;
@@ -40,7 +42,8 @@ class ONNXModelRunner implements AutoCloseable {
         heyNuggetSession = env.createSession(readModelFile("hey_nugget_new.onnx"));
     }
 
-    public float[][] get_mel_spectrogram(float[] inputArray) throws OrtException {
+    public float[][] get_mel_spectrogram(float[] inputArray) throws OrtException, IOException {
+        Log.d(TAG, "get_mel_spectrogram called with input size: " + inputArray.length);
         float[][] outputArray = null;
         int SAMPLES = inputArray.length;
         OnnxTensor inputTensor = null; // Declare outside try for finally block
@@ -53,16 +56,19 @@ class ONNXModelRunner implements AutoCloseable {
 
             // Run the model using the member session
             try (OrtSession.Result results = melspectrogramSession.run(Collections.singletonMap(melspectrogramSession.getInputNames().iterator().next(), inputTensor))) {
+                Log.d(TAG, "MelSpectrogram model run finished.");
                 float[][][][] outputTensor = (float[][][][]) results.get(0).getValue();
                 float[][] squeezed = squeeze(outputTensor);
                 outputArray = applyMelSpecTransform(squeezed);
+                Log.d(TAG, "MelSpectrogram processing finished.");
             }
         } catch (Exception e) {
             // Log the exception properly instead of just printing stack trace
-             Log.e("ONNXModelRunner", "Error during mel spectrogram inference", e);
+             Log.e(TAG, "Error during mel spectrogram inference", e);
              // Optionally re-throw or handle differently
              throw new OrtException("Mel spectrogram inference failed. See logs for details.");
         } finally {
+            Log.d(TAG, "Closing MelSpectrogram resources.");
             if (inputTensor != null) inputTensor.close();
             // Do NOT close the session here, it's managed by the class
             // if (session!=null) session.close(); // Remove
@@ -92,14 +98,8 @@ class ONNXModelRunner implements AutoCloseable {
         return transformedArray;
     }
 
-    public float[][] generateEmbeddings(float[][][][] input) throws OrtException {
-       // OrtEnvironment env = OrtEnvironment.getEnvironment(); // Remove: Use member variable env
-       // InputStream is = assetManager.open("embedding_model.onnx"); // Remove: Session loading moved to constructor
-       // byte[] model = new byte[is.available()]; // Remove
-       // is.read(model); // Remove
-       // is.close(); // Remove
-       // OrtSession sess = env.createSession(model); // Remove: Use member session
-
+    public float[][] generateEmbeddings(float[][][][] input) throws OrtException, IOException {
+        Log.d(TAG, "generateEmbeddings called with input shape: [" + input.length + ", " + input[0].length + ", " + input[0][0].length + ", " + input[0][0][0].length + "]");
         OnnxTensor inputTensor = null; // Declare outside try for finally block
 
         try {
@@ -122,18 +122,20 @@ class ONNXModelRunner implements AutoCloseable {
                         System.arraycopy(rawOutput[i][0][0], 0, reshapedOutput[i], 0, rawOutput[i][0][0].length);
                     } else {
                          // Handle potential inconsistent inner dimensions if the model doesn't guarantee uniformity
-                        Log.w("ONNXModelRunner", "Inconsistent inner dimension in embedding output at index " + i);
+                        Log.w(TAG, "Inconsistent inner dimension in embedding output at index " + i);
                         // Depending on requirements, you might fill with zeros, skip, or throw an error
                     }
                 }
+                Log.d(TAG, "Embedding processing finished. Output shape: [" + reshapedOutput.length + ", " + reshapedOutput[0].length + "]");
                 return reshapedOutput;
             }
         } catch (Exception e) {
-            Log.e("ONNXModelRunner", "Error during embedding generation", e);
+            Log.e(TAG, "Error during embedding generation", e);
              // Re-throw as OrtException or handle appropriately
              throw new OrtException("Embedding generation failed. See logs for details.");
             // return null; // Avoid returning null, prefer exceptions for errors
         } finally {
+            Log.d(TAG, "Closing Embedding resources.");
             if (inputTensor != null) inputTensor.close();
             // if (sess != null) sess.close(); // REMOVE: Session is now managed by the class
         }
@@ -143,6 +145,7 @@ class ONNXModelRunner implements AutoCloseable {
 
 
     public String predictWakeWord(float[][][] inputArray) throws OrtException {
+        Log.d(TAG, "predictWakeWord called with input shape: [" + inputArray.length + ", " + inputArray[0].length + ", " + inputArray[0][0].length + "]");
         float[][] result; // No need to initialize here
         String resultant = ""; // Initialize as empty
 
@@ -159,15 +162,16 @@ class ONNXModelRunner implements AutoCloseable {
              if (result != null && result.length > 0 && result[0].length > 0) {
                 resultant = String.format("%.5f", (double) result[0][0]);
              } else {
-                 Log.e("ONNXModelRunner", "Wake word model produced invalid output.");
+                 Log.e(TAG, "Wake word model produced invalid output.");
                  // Handle error appropriately, maybe return a default value or throw
                  resultant = "Error"; // Or throw new OrtException("Invalid wake word output");
              }
 
         } catch (OrtException e) {
-            Log.e("ONNXModelRunner", "Error during wake word prediction", e);
+            Log.e(TAG, "Error during wake word prediction", e);
             throw e; // Re-throw the exception
         } finally {
+            Log.d(TAG, "Closing Wake Word input tensor.");
             if (inputTensor != null) inputTensor.close();
             // Do NOT close the session here
         }
@@ -196,12 +200,13 @@ class ONNXModelRunner implements AutoCloseable {
          if (melspectrogramSession != null) melspectrogramSession.close();
          // Close the environment last
          if (env != null) env.close();
-         Log.i("ONNXModelRunner", "ONNX resources closed.");
+         Log.i(TAG, "ONNX resources closed.");
      }
 }
 
 
 public class Model {
+    private static final String TAG = "ExampleModel";
     int n_prepared_samples=1280;
     int sampleRate=16000;
     int melspectrogramMaxLen= 10*97;
@@ -266,19 +271,15 @@ public class Model {
 
     // Java equivalent to _get_embeddings method
     private float[][] _getEmbeddings(float[] x, int windowSize, int stepSize) throws OrtException, IOException {
-
+        Log.d(TAG, "_getEmbeddings called with input size: " + x.length);
         // Ensure modelRunner is not null before using
          if (this.modelRunner == null) {
              throw new IllegalStateException("ONNXModelRunner is not initialized.");
          }
 
         float[][] spec = this.modelRunner.get_mel_spectrogram(x); // Assuming this method exists and returns float[][]
-
-         // Add null check for spec
-         if (spec == null || spec.length == 0 || spec[0].length == 0) {
-             Log.w("Model", "_getEmbeddings: Mel spectrogram is null or empty.");
-             return new float[0][0]; // Return empty array or handle appropriately
-         }
+         Log.d(TAG, "_getEmbeddings: get_mel_spectrogram finished. Null: " + (spec == null));
+        if (spec == null) return null;
 
         ArrayList<float[][]> windows = new ArrayList<>();
         int specCols = spec[0].length; // Get number of columns once
@@ -300,7 +301,7 @@ public class Model {
         }
 
         if (windows.isEmpty()) {
-             Log.w("Model", "_getEmbeddings: No valid windows created from spectrogram.");
+             Log.w(TAG, "_getEmbeddings: No valid windows created from spectrogram.");
              return new float[0][0]; // Or handle as needed
          }
 
@@ -320,7 +321,9 @@ public class Model {
             }
         }
          // Call generateEmbeddings with the prepared batch
-         return this.modelRunner.generateEmbeddings(batch);
+         float[][] embeddings = this.modelRunner.generateEmbeddings(batch);
+         Log.d(TAG, "_getEmbeddings: generateEmbeddings finished. Null: " + (embeddings == null));
+         return embeddings;
     }
 
     // Utility function to generate random int array, equivalent to np.random.randint
@@ -347,22 +350,57 @@ public class Model {
 
     public void streamingMelSpectrogram(int n_samples) {
         if (raw_data_buffer.size() < 400) {
-            throw new IllegalArgumentException("The number of input frames must be at least 400 samples @ 16kHz (25 ms)!");
+            // Log error instead of throwing directly for smoother debugging
+            Log.e(TAG, "streamingMelSpectrogram: Not enough data in buffer (< 400)");
+            // throw new IllegalArgumentException("The number of input frames must be at least 400 samples @ 16kHz (25 ms)!");
+            return; // Exit if not enough data
         }
 
         // Converting the last n_samples + 480 (3 * 160) samples from raw_data_buffer to an ArrayList
-        float[] tempArray = new float[n_samples + 480]; // 160 * 3 = 480
-        Object[] rawDataArray = raw_data_buffer.toArray();
-        for (int i = Math.max(0, rawDataArray.length - n_samples - 480); i < rawDataArray.length; i++) {
-            tempArray[i - Math.max(0, rawDataArray.length - n_samples - 480)] = (Float) rawDataArray[i];
+        int requiredSize = n_samples + 480;
+        if (raw_data_buffer.size() < requiredSize) {
+            Log.w(TAG, "streamingMelSpectrogram: Buffer size (" + raw_data_buffer.size() + ") less than required (" + requiredSize + ")");
+            // Adjust requiredSize or handle insufficient data gracefully
+            requiredSize = raw_data_buffer.size(); // Process what's available?
+            if (requiredSize < 400) return; // Still need minimum for mel spectrogram
         }
+
+        float[] tempArray = new float[requiredSize]; 
+        Object[] rawDataArray = raw_data_buffer.toArray(); // Convert deque to array
+        int startIndex = Math.max(0, rawDataArray.length - requiredSize);
+        int copyCount = 0;
+        for (int i = startIndex; i < rawDataArray.length; i++) {
+             if (rawDataArray[i] instanceof Float) { // Type safety
+                 tempArray[copyCount++] = (Float) rawDataArray[i];
+             } else {
+                 Log.e(TAG, "Non-float found in raw_data_buffer at index " + i);
+                 // Handle error or skip
+             }
+        }
+         // If copyCount != requiredSize, there was an issue. Check copyCount.
+         if (copyCount != requiredSize) {
+             Log.w(TAG, "streamingMelSpectrogram: Mismatch copying buffer data. Expected " + requiredSize + ", got " + copyCount);
+             // Maybe resize tempArray or return
+             if (copyCount < 400) return;
+             tempArray = Arrays.copyOf(tempArray, copyCount); // Use only copied data
+         }
+
 
         // Assuming getMelSpectrogram returns a two-dimensional float array
         float[][] new_mel_spectrogram ;
         try {
             new_mel_spectrogram = modelRunner.get_mel_spectrogram(tempArray);
-        } catch (OrtException e) {
-            throw new RuntimeException(e);
+        } catch (OrtException | IOException e) { // Catch both declared exceptions
+             Log.e(TAG, "Error calling get_mel_spectrogram", e);
+             // Handle error - maybe clear buffer or just return?
+             return; // Exit method on error
+            // throw new RuntimeException(e); // Optionally rethrow if needed
+        }
+
+        // Check if mel spectrogram generation was successful
+        if (new_mel_spectrogram == null || new_mel_spectrogram.length == 0) {
+            Log.w(TAG, "streamingMelSpectrogram: get_mel_spectrogram returned null or empty.");
+            return;
         }
 
         // Combine existing melspectrogram_buffer with new_mel_spectrogram
@@ -374,10 +412,16 @@ public class Model {
 
         // Trim the melspectrogram_buffer if it exceeds the max length
         if (this.melspectrogramBuffer.length > melspectrogramMaxLen) {
-            float[][] trimmed = new float[melspectrogramMaxLen][];
+            // Ensure valid dimensions before trimming
+             if (melspectrogramMaxLen <= 0 || this.melspectrogramBuffer.length == 0 || this.melspectrogramBuffer[0].length == 0) {
+                 Log.e(TAG, "Invalid dimensions for trimming spectrogram buffer.");
+                 return;
+             }
+            float[][] trimmed = new float[melspectrogramMaxLen][this.melspectrogramBuffer[0].length]; // Use correct column dimension
             System.arraycopy(this.melspectrogramBuffer, this.melspectrogramBuffer.length - melspectrogramMaxLen, trimmed, 0, melspectrogramMaxLen);
             this.melspectrogramBuffer = trimmed;
         }
+         Log.d(TAG, "streamingMelSpectrogram finished. Buffer length: " + this.melspectrogramBuffer.length);
 
     }
 
@@ -505,6 +549,7 @@ public class Model {
     }
 
     public String predict_WakeWord(float[] audiobuffer){
+        Log.d(TAG, "predict_WakeWord received chunk size: " + audiobuffer.length);
 
         n_prepared_samples=this.streaming_features(audiobuffer);
         float[][][] res=this.getFeatures(16,-1);
