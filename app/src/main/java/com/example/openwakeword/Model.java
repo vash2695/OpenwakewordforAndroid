@@ -20,64 +20,54 @@ import ai.onnxruntime.OrtException;
 import ai.onnxruntime.OrtSession;
 
 
-class ONNXModelRunner {
+class ONNXModelRunner implements AutoCloseable {
 
     private static final int BATCH_SIZE = 1; // Replace with your batch size
 
-    AssetManager assetManager;
-    OrtSession hey_nugget_session;
-    OrtEnvironment hey_nugget_env = OrtEnvironment.getEnvironment();
+    private final AssetManager assetManager;
+    private final OrtEnvironment env;
+    private final OrtSession melspectrogramSession;
+    private final OrtSession embeddingSession;
+    private final OrtSession heyNuggetSession;
+
     public ONNXModelRunner(AssetManager assetManager) throws IOException, OrtException {
-        this.assetManager=assetManager;
+        this.assetManager = assetManager;
+        this.env = OrtEnvironment.getEnvironment(); // Get the environment once
 
-        try {
-            hey_nugget_session = hey_nugget_env.createSession(readModelFile(assetManager, "hey_nugget_new.onnx"));
-        } catch (IOException e) {
-            throw new RuntimeException(e);
-        }
-        // Load the ONNX model from the assets folder
-
+        // Load all models and create sessions in the constructor
+        melspectrogramSession = env.createSession(readModelFile("melspectrogram.onnx"));
+        embeddingSession = env.createSession(readModelFile("embedding_model.onnx"));
+        heyNuggetSession = env.createSession(readModelFile("hey_nugget_new.onnx"));
     }
 
-    public float[][] get_mel_spectrogram(float[] inputArray) throws OrtException, IOException {
-        OrtSession session;
-        try (InputStream modelInputStream = assetManager.open("melspectrogram.onnx")) {
-            byte[] modelBytes = new byte[modelInputStream.available()];
-            modelInputStream.read(modelBytes);
-            session = OrtEnvironment.getEnvironment().createSession(modelBytes);
-        }
-        float[][] outputArray=null;
-        int SAMPLES=inputArray.length;
-        // Convert the input array to ONNX Tensor
-        FloatBuffer floatBuffer = FloatBuffer.wrap(inputArray);
-        OnnxTensor inputTensor = OnnxTensor.createTensor(OrtEnvironment.getEnvironment(), floatBuffer, new long[]{BATCH_SIZE, SAMPLES});
+    public float[][] get_mel_spectrogram(float[] inputArray) throws OrtException {
+        float[][] outputArray = null;
+        int SAMPLES = inputArray.length;
+        OnnxTensor inputTensor = null; // Declare outside try for finally block
 
-        // Run the model
-        // Adjust this based on the actual expected output shape
-        try (OrtSession.Result results = session.run(Collections.singletonMap(session.getInputNames().iterator().next(), inputTensor))) {
+        try {
+            // Convert the input array to ONNX Tensor
+            FloatBuffer floatBuffer = FloatBuffer.wrap(inputArray);
+            // Use the shared environment 'env'
+            inputTensor = OnnxTensor.createTensor(env, floatBuffer, new long[]{BATCH_SIZE, SAMPLES});
 
-            float[][][][] outputTensor = (float[][][][]) results.get(0).getValue();
-            // Here you need to cast the output appropriately
-//            Object outputObject = outputTensor.getValue();
-
-            // Check the actual type of 'outputObject' and cast accordingly
-            // The following is an assumed cast based on your error message
-
-            float[][] squeezed=squeeze(outputTensor);
-            outputArray=applyMelSpecTransform(squeezed);
-
-
-        }
-        catch (Exception e)
-        {
-            e.printStackTrace();
-
-        }
-        finally {
+            // Run the model using the member session
+            try (OrtSession.Result results = melspectrogramSession.run(Collections.singletonMap(melspectrogramSession.getInputNames().iterator().next(), inputTensor))) {
+                float[][][][] outputTensor = (float[][][][]) results.get(0).getValue();
+                float[][] squeezed = squeeze(outputTensor);
+                outputArray = applyMelSpecTransform(squeezed);
+            }
+        } catch (Exception e) {
+            // Log the exception properly instead of just printing stack trace
+             Log.e("ONNXModelRunner", "Error during mel spectrogram inference", e);
+             // Optionally re-throw or handle differently
+             throw new OrtException("Mel spectrogram inference failed. See logs for details.");
+        } finally {
             if (inputTensor != null) inputTensor.close();
-            if (session!=null) session.close();
+            // Do NOT close the session here, it's managed by the class
+            // if (session!=null) session.close(); // Remove
         }
-        OrtEnvironment.getEnvironment().close();
+        // OrtEnvironment.getEnvironment().close(); // REMOVE: Environment should not be closed here
         return outputArray;
     }
     public static float[][] squeeze(float[][][][] originalArray) {
@@ -102,69 +92,112 @@ class ONNXModelRunner {
         return transformedArray;
     }
 
-    public float[][] generateEmbeddings(float[][][][] input) throws OrtException, IOException {
-        OrtEnvironment env = OrtEnvironment.getEnvironment();
-        InputStream is = assetManager.open("embedding_model.onnx");
-        byte[] model = new byte[is.available()];
-        is.read(model);
-        is.close();
+    public float[][] generateEmbeddings(float[][][][] input) throws OrtException {
+       // OrtEnvironment env = OrtEnvironment.getEnvironment(); // Remove: Use member variable env
+       // InputStream is = assetManager.open("embedding_model.onnx"); // Remove: Session loading moved to constructor
+       // byte[] model = new byte[is.available()]; // Remove
+       // is.read(model); // Remove
+       // is.close(); // Remove
+       // OrtSession sess = env.createSession(model); // Remove: Use member session
 
-        OrtSession sess = env.createSession(model);
-        OnnxTensor inputTensor = OnnxTensor.createTensor(env, input);
-        try (OrtSession.Result results = sess.run(Collections.singletonMap("input_1", inputTensor))) {
-            // Extract the output tensor
-            float[][][][] rawOutput = (float[][][][]) results.get(0).getValue();
-
-            // Assuming the output shape is (41, 1, 1, 96), and we want to reshape it to (41, 96)
-            float[][] reshapedOutput = new float[rawOutput.length][rawOutput[0][0][0].length];
-            for (int i = 0; i < rawOutput.length; i++) {
-                System.arraycopy(rawOutput[i][0][0], 0, reshapedOutput[i], 0, rawOutput[i][0][0].length);
-            }
-            return reshapedOutput;
-        } catch (Exception e) {
-            Log.d("exception", "not_predicted " + e.getMessage());
-        }
-        finally {
-            if (inputTensor != null) inputTensor.close(); // You're doing this, which is good.
-            if (sess != null) sess.close(); // This should be added to ensure the session is also closed.
-        }
-        env.close();
-        return null;
-    }
-
-    public String predictWakeWord(float[][][] inputArray) throws OrtException {
-        float[][] result = new float[0][];
-        String resultant="";
-
-
-        OnnxTensor inputTensor = null;
+        OnnxTensor inputTensor = null; // Declare outside try for finally block
 
         try {
-            // Create a tensor from the input array
-            inputTensor = OnnxTensor.createTensor(hey_nugget_env, inputArray);
-            // Run the inference
-            OrtSession.Result outputs = hey_nugget_session.run(Collections.singletonMap(hey_nugget_session.getInputNames().iterator().next(), inputTensor));
+            // Use the shared environment 'env'
+            inputTensor = OnnxTensor.createTensor(env, input);
+            // Use the member session 'embeddingSession'
+            try (OrtSession.Result results = embeddingSession.run(Collections.singletonMap("input_1", inputTensor))) { // Assuming input name is "input_1"
+                // Extract the output tensor
+                float[][][][] rawOutput = (float[][][][]) results.get(0).getValue();
+
+                // Assuming the output shape is (N, 1, 1, 96), and we want to reshape it to (N, 96)
+                // Check dimensions before accessing
+                 if (rawOutput == null || rawOutput.length == 0 || rawOutput[0].length == 0 || rawOutput[0][0].length == 0 || rawOutput[0][0][0].length == 0) {
+                    throw new OrtException("Embedding model produced invalid output shape.");
+                 }
+                float[][] reshapedOutput = new float[rawOutput.length][rawOutput[0][0][0].length];
+                for (int i = 0; i < rawOutput.length; i++) {
+                   // Ensure inner dimensions are also valid if necessary, depending on model guarantees
+                   if (rawOutput[i].length > 0 && rawOutput[i][0].length > 0 && rawOutput[i][0][0].length > 0) {
+                        System.arraycopy(rawOutput[i][0][0], 0, reshapedOutput[i], 0, rawOutput[i][0][0].length);
+                    } else {
+                         // Handle potential inconsistent inner dimensions if the model doesn't guarantee uniformity
+                        Log.w("ONNXModelRunner", "Inconsistent inner dimension in embedding output at index " + i);
+                        // Depending on requirements, you might fill with zeros, skip, or throw an error
+                    }
+                }
+                return reshapedOutput;
+            }
+        } catch (Exception e) {
+            Log.e("ONNXModelRunner", "Error during embedding generation", e);
+             // Re-throw as OrtException or handle appropriately
+             throw new OrtException("Embedding generation failed. See logs for details.");
+            // return null; // Avoid returning null, prefer exceptions for errors
+        } finally {
+            if (inputTensor != null) inputTensor.close();
+            // if (sess != null) sess.close(); // REMOVE: Session is now managed by the class
+        }
+       // env.close(); // REMOVE: Environment should not be closed here
+       // Return null removed, exception is thrown instead
+    }
+
+
+    public String predictWakeWord(float[][][] inputArray) throws OrtException {
+        float[][] result; // No need to initialize here
+        String resultant = ""; // Initialize as empty
+
+        OnnxTensor inputTensor = null; // Declare outside try for finally block
+
+        try {
+            // Create a tensor from the input array using the shared environment 'env'
+            inputTensor = OnnxTensor.createTensor(env, inputArray);
+            // Run the inference using the member session 'heyNuggetSession'
+            OrtSession.Result outputs = heyNuggetSession.run(Collections.singletonMap(heyNuggetSession.getInputNames().iterator().next(), inputTensor));
             // Extract the output tensor, convert it to the desired type
-             result=(float[][]) outputs.get(0).getValue();
-            resultant= String.format("%.5f", (double) result[0][0]);
+            result = (float[][]) outputs.get(0).getValue();
+             // Check if result is valid before accessing
+             if (result != null && result.length > 0 && result[0].length > 0) {
+                resultant = String.format("%.5f", (double) result[0][0]);
+             } else {
+                 Log.e("ONNXModelRunner", "Wake word model produced invalid output.");
+                 // Handle error appropriately, maybe return a default value or throw
+                 resultant = "Error"; // Or throw new OrtException("Invalid wake word output");
+             }
 
         } catch (OrtException e) {
-            e.printStackTrace();
-        }
-        finally {
+            Log.e("ONNXModelRunner", "Error during wake word prediction", e);
+            throw e; // Re-throw the exception
+        } finally {
             if (inputTensor != null) inputTensor.close();
-             // Add this to ensure the session is properly closed.
+            // Do NOT close the session here
         }
         return resultant;
     }
-    private byte[] readModelFile(AssetManager assetManager, String filename) throws IOException {
+
+    private byte[] readModelFile(String filename) throws IOException {
         try (InputStream is = assetManager.open(filename)) {
-            byte[] buffer = new byte[is.available()];
-            is.read(buffer);
-            return buffer;
+            // Efficiently read bytes
+            ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+            int nRead;
+            byte[] data = new byte[16384]; // Or another reasonable buffer size
+            while ((nRead = is.read(data, 0, data.length)) != -1) {
+                buffer.write(data, 0, nRead);
+            }
+            return buffer.toByteArray();
         }
     }
 
+     // Implement AutoCloseable to release resources
+     @Override
+     public void close() throws OrtException {
+         // Close sessions in reverse order of creation (optional, but good practice)
+         if (heyNuggetSession != null) heyNuggetSession.close();
+         if (embeddingSession != null) embeddingSession.close();
+         if (melspectrogramSession != null) melspectrogramSession.close();
+         // Close the environment last
+         if (env != null) env.close();
+         Log.i("ONNXModelRunner", "ONNX resources closed.");
+     }
 }
 
 
@@ -189,13 +222,25 @@ public class Model {
         this.modelRunner=modelRunner;
         try{
 
-            this.featureBuffer = this._getEmbeddings(this.generateRandomIntArray(16000 * 4), 76, 8);
+            // Initialize featureBuffer with zeros or a placeholder, not random embeddings
+            // The size calculation might need adjustment based on expected embedding output dimensions (e.g., 96)
+             int embeddingDim = 96; // Assuming the embedding model outputs 96 features
+             this.featureBuffer = new float[feature_buffer_max_len][embeddingDim];
+             // Initialize with zeros or a suitable placeholder value if needed
+             // for (int i = 0; i < feature_buffer_max_len; i++) {
+             //     Arrays.fill(this.featureBuffer[i], 0.0f);
+             // }
+
+             // The original random initialization seems incorrect for a real application.
+             // this.featureBuffer = this._getEmbeddings(this.generateRandomIntArray(16000 * 4), 76, 8);
 
         }
-    catch (Exception e)
+    catch (Exception e) // Catch specific exceptions if possible (IOException, OrtException)
     {
 
-        System.out.print(e.getMessage());
+        // Log error properly
+         Log.e("ModelInit", "Error initializing feature buffer", e);
+         // Handle initialization failure, maybe rethrow or set a flag
     }
 
     }
@@ -222,39 +267,60 @@ public class Model {
     // Java equivalent to _get_embeddings method
     private float[][] _getEmbeddings(float[] x, int windowSize, int stepSize) throws OrtException, IOException {
 
+        // Ensure modelRunner is not null before using
+         if (this.modelRunner == null) {
+             throw new IllegalStateException("ONNXModelRunner is not initialized.");
+         }
+
         float[][] spec = this.modelRunner.get_mel_spectrogram(x); // Assuming this method exists and returns float[][]
+
+         // Add null check for spec
+         if (spec == null || spec.length == 0 || spec[0].length == 0) {
+             Log.w("Model", "_getEmbeddings: Mel spectrogram is null or empty.");
+             return new float[0][0]; // Return empty array or handle appropriately
+         }
+
         ArrayList<float[][]> windows = new ArrayList<>();
+        int specCols = spec[0].length; // Get number of columns once
 
         for (int i = 0; i <= spec.length - windowSize; i += stepSize) {
-            float[][] window = new float[windowSize][spec[0].length];
+            float[][] window = new float[windowSize][specCols]; // Use specCols
 
             for (int j = 0; j < windowSize; j++) {
-                System.arraycopy(spec[i + j], 0, window[j], 0, spec[0].length);
+                 // Add boundary check for spec[i + j] just in case
+                 if (i + j < spec.length) {
+                     System.arraycopy(spec[i + j], 0, window[j], 0, specCols);
+                 }
             }
 
-            // Check if the window is full-sized (not truncated)
-            if (window.length == windowSize) {
-                windows.add(window);
-            }
+            // Check if the window is full-sized (not truncated) - this check might be redundant given the loop condition
+            // if (window.length == windowSize) { // This should always be true due to loop condition
+                 windows.add(window);
+            // }
         }
 
+        if (windows.isEmpty()) {
+             Log.w("Model", "_getEmbeddings: No valid windows created from spectrogram.");
+             return new float[0][0]; // Or handle as needed
+         }
+
         // Convert ArrayList to array and add the required extra dimension
-        float[][][][] batch = new float[windows.size()][windowSize][spec[0].length][1];
-        for (int i = 0; i < windows.size(); i++) {
+         int numWindows = windows.size();
+         // Assuming specCols represents the correct dimension (e.g., 32)
+         float[][][][] batch = new float[numWindows][windowSize][specCols][1];
+        for (int i = 0; i < numWindows; i++) {
+            float[][] currentWindow = windows.get(i);
             for (int j = 0; j < windowSize; j++) {
-                for (int k = 0; k < spec[0].length; k++) {
-                    batch[i][j][k][0] = windows.get(i)[j][k];  // Add the extra dimension here
+                for (int k = 0; k < specCols; k++) {
+                     // Add bounds check for currentWindow just in case
+                     if (j < currentWindow.length && k < currentWindow[j].length) {
+                         batch[i][j][k][0] = currentWindow[j][k]; // Add the extra dimension here
+                     }
                 }
             }
         }
-
-        try {
-           float[][]  result= modelRunner.generateEmbeddings(batch);
-           return result;
-        } catch (IOException e) {
-            throw new RuntimeException(e);
-        }
-        // Assuming embeddingModelPredict is defined and returns float[][]
+         // Call generateEmbeddings with the prepared batch
+         return this.modelRunner.generateEmbeddings(batch);
     }
 
     // Utility function to generate random int array, equivalent to np.random.randint
@@ -296,8 +362,6 @@ public class Model {
         try {
             new_mel_spectrogram = modelRunner.get_mel_spectrogram(tempArray);
         } catch (OrtException e) {
-            throw new RuntimeException(e);
-        } catch (IOException e) {
             throw new RuntimeException(e);
         }
 
